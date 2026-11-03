@@ -1,0 +1,64 @@
+# Run UPMS in containers:
+#   cp .env.docker.example .env.docker   # fill in APP_KEY and passwords
+#   docker compose up -d --build
+#   docker compose exec web php artisan db:seed --class=ChartOfAccountsSeeder --force
+# then open http://localhost:8080/admin
+#
+# Meshery can import this file as a design (Designs > Import > Docker Compose).
+
+x-app: &app
+  image: upms:latest
+  env_file: .env.docker
+  restart: unless-stopped
+  depends_on:
+    mysql:
+      condition: service_healthy
+
+services:
+  web:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      RUN_MIGRATIONS: "true"
+    ports:
+      - "8080:80"
+    volumes:
+      - uploads:/var/www/html/storage/app/private
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/up"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    <<: *app
+    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--max-time=3600"]
+    depends_on:
+      web:
+        condition: service_started
+
+  scheduler:
+    <<: *app
+    command: ["php", "artisan", "schedule:work"]
+    depends_on:
+      web:
+        condition: service_started
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command: ["--log-bin-trust-function-creators=1"]
+    env_file: .env.docker
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:
+  uploads:

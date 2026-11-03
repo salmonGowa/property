@@ -1,0 +1,272 @@
+# UPMS on Kubernetes. Import into Meshery (Designs > Import > Kubernetes Manifest)
+# or apply directly:  kubectl apply -f docker/kubernetes/upms.yaml
+#
+# Before deploying:
+#   1. Build and push the image:  docker build -f docker/Dockerfile -t <registry>/upms:1.0.0 . && docker push <registry>/upms:1.0.0
+#      then replace every "registry.example.com/upms:1.0.0" below.
+#   2. Fill in the upms-secrets values (APP_KEY from `php artisan key:generate --show`).
+#      Do not publish this file to a shared catalogue with real secrets in it.
+#   3. Set the ingress host and APP_URL to your domain.
+#
+# Web runs one replica because uploaded KYC documents live on a ReadWriteOnce volume;
+# use ReadWriteMany storage (or S3) before scaling it out. The scheduler must stay at one replica.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: upms
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: upms-secrets
+  namespace: upms
+type: Opaque
+stringData:
+  APP_KEY: "base64:REPLACE_ME"
+  DB_PASSWORD: "REPLACE_ME"
+  MYSQL_PASSWORD: "REPLACE_ME"
+  MYSQL_ROOT_PASSWORD: "REPLACE_ME"
+  MPESA_CALLBACK_TOKEN: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upms-config
+  namespace: upms
+data:
+  APP_NAME: "UPMS"
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  APP_URL: "https://upms.example.com"
+  LOG_CHANNEL: "stderr"
+  LOG_LEVEL: "info"
+  DB_CONNECTION: "mysql"
+  DB_HOST: "upms-mysql"
+  DB_PORT: "3306"
+  DB_DATABASE: "upms"
+  DB_USERNAME: "upms"
+  MYSQL_DATABASE: "upms"
+  MYSQL_USER: "upms"
+  SESSION_DRIVER: "database"
+  CACHE_STORE: "database"
+  QUEUE_CONNECTION: "database"
+  FILESYSTEM_DISK: "local"
+  TRUSTED_PROXIES: "*"
+  MPESA_SHORTCODE: ""
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upms-mysql
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: database }
+spec:
+  clusterIP: None
+  selector: { app.kubernetes.io/name: upms, app.kubernetes.io/component: database }
+  ports:
+    - name: mysql
+      port: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: upms-mysql
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: database }
+spec:
+  serviceName: upms-mysql
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: database }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: database }
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          # The ledger's immutability triggers are created by the app user, which needs this with binary logging on.
+          args: ["--log-bin-trust-function-creators=1"]
+          ports:
+            - containerPort: 3306
+          envFrom:
+            - configMapRef: { name: upms-config }
+            - secretRef: { name: upms-secrets }
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h localhost -u root -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: upms-uploads
+  namespace: upms
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: upms-migrate
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: migrate }
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: migrate }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: registry.example.com/upms:1.0.0
+          command: ["upms-entrypoint", "php", "artisan", "migrate", "--force"]
+          envFrom:
+            - configMapRef: { name: upms-config }
+            - secretRef: { name: upms-secrets }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upms-web
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: web }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: web }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: web }
+    spec:
+      containers:
+        - name: web
+          image: registry.example.com/upms:1.0.0
+          ports:
+            - containerPort: 80
+          envFrom:
+            - configMapRef: { name: upms-config }
+            - secretRef: { name: upms-secrets }
+          readinessProbe:
+            httpGet: { path: /up, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /up, port: 80 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: uploads
+              mountPath: /var/www/html/storage/app/private
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: upms-uploads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upms-web
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: web }
+spec:
+  selector: { app.kubernetes.io/name: upms, app.kubernetes.io/component: web }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: upms
+  namespace: upms
+spec:
+  rules:
+    - host: upms.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: upms-web
+                port: { number: 80 }
+  # tls:
+  #   - hosts: [upms.example.com]
+  #     secretName: upms-tls
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upms-worker
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: worker }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: worker }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: worker }
+    spec:
+      containers:
+        - name: worker
+          image: registry.example.com/upms:1.0.0
+          args: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--max-time=3600"]
+          envFrom:
+            - configMapRef: { name: upms-config }
+            - secretRef: { name: upms-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upms-scheduler
+  namespace: upms
+  labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: scheduler }
+spec:
+  # Exactly one: the daily billing, penalty, maintenance and monthly loan jobs must not run twice.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: scheduler }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: upms, app.kubernetes.io/component: scheduler }
+    spec:
+      containers:
+        - name: scheduler
+          image: registry.example.com/upms:1.0.0
+          args: ["php", "artisan", "schedule:work"]
+          envFrom:
+            - configMapRef: { name: upms-config }
+            - secretRef: { name: upms-secrets }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
