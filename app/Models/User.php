@@ -13,13 +13,14 @@ use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
 
 #[Fillable(['name', 'email', 'password', 'role', 'is_active', 'purchase_approval_limit'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable implements FilamentUser
 {
     /** @use HasFactory<UserFactory> */
-    use Auditable, HasFactory, Notifiable;
+    use Auditable, HasApiTokens, HasFactory, Notifiable;
 
     /**
      * Attributes whose values are masked in the audit log.
@@ -45,6 +46,14 @@ class User extends Authenticatable implements FilamentUser
     }
 
     public function canAccessPanel(Panel $panel): bool
+    {
+        return $this->canSignIn();
+    }
+
+    /**
+     * Only active users with a role may use the back office, whether through Filament or the API.
+     */
+    public function canSignIn(): bool
     {
         return $this->is_active && $this->role !== null;
     }
