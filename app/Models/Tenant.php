@@ -93,6 +93,32 @@ class Tenant extends Model
     }
 
     /**
+     * Store Kenyan mobile numbers in international format: +254712345678.
+     */
+    public static function normalisePhone(?string $phone): ?string
+    {
+        if (blank($phone)) {
+            return null;
+        }
+
+        $digits = preg_replace('/\D/', '', $phone);
+
+        return '+254'.substr($digits, str_starts_with($digits, '254') ? 3 : 1);
+    }
+
+    /**
+     * The ID number with all but the last three characters hidden, for users who may not see KYC data.
+     */
+    public function maskedIdNumber(): ?string
+    {
+        if (blank($this->id_number)) {
+            return null;
+        }
+
+        return str_repeat('•', max(0, strlen($this->id_number) - 3)).substr($this->id_number, -3);
+    }
+
+    /**
      * Amount owed by the tenant; negative when they are in credit.
      */
     public function balance(): string

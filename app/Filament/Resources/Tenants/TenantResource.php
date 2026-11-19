@@ -350,13 +350,7 @@ class TenantResource extends Resource
      */
     public static function normalisePhone(?string $phone): ?string
     {
-        if (blank($phone)) {
-            return null;
-        }
-
-        $digits = preg_replace('/\D/', '', $phone);
-
-        return '+254'.substr($digits, str_starts_with($digits, '254') ? 3 : 1);
+        return Tenant::normalisePhone($phone);
     }
 
     /**
@@ -364,14 +358,6 @@ class TenantResource extends Resource
      */
     private static function maskedIdNumber(Tenant $tenant): ?string
     {
-        if (blank($tenant->id_number)) {
-            return null;
-        }
-
-        if (Auth::user()?->can('viewDocuments', $tenant)) {
-            return $tenant->id_number;
-        }
-
-        return str_repeat('•', max(0, strlen($tenant->id_number) - 3)).substr($tenant->id_number, -3);
+        return Auth::user()?->can('viewDocuments', $tenant) ? $tenant->id_number : $tenant->maskedIdNumber();
     }
 }
