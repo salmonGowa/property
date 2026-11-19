@@ -8,6 +8,12 @@ Route::get('/', function () {
     return view('welcome');
 });
 
+/*
+ * The React back office. Every path under /app is handled by the SPA's own router;
+ * data comes from the /api/v1 endpoints.
+ */
+Route::view('/app/{path?}', 'spa')->where('path', '.*')->name('spa');
+
 Route::prefix('mpesa/{token}/c2b')
     ->withoutMiddleware(PreventRequestForgery::class)
     ->middleware('throttle:120,1')
